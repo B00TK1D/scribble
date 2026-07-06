@@ -1,0 +1,19 @@
+# Binary
+scribble
+
+# Test binary
+*.test
+test.py
+
+# Go build cache
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
