@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/binary"
-	"fmt"
 	"math/rand"
 	"sort"
 )
@@ -13,95 +12,68 @@ type FontResult struct {
 	CharMap   *CharMap
 }
 
-// RandomizeFont shuffles the cmap to map each glyph to a random PUA
-// codepoint and returns the modified font as TTF.
-func RandomizeFont(baseFont []byte, seed int64, usedChars []rune) (*FontResult, error) {
-	if len(baseFont) < 12 {
-		return nil, fmt.Errorf("font too small (%d bytes)", len(baseFont))
+// tblInfo holds a table's offset and length in the font binary.
+type tblInfo struct{ offset, length uint32 }
+
+// buildFont constructs a complete SFNT font from a map of table tag → bytes.
+// Tables are sorted by tag, offsets are recalculated, and the head checksum
+// is zeroed.
+func buildFont(tables map[uint32][]byte) ([]byte, error) {
+	tags := make([]uint32, 0, len(tables))
+	for tag := range tables {
+		tags = append(tags, tag)
+	}
+	sort.Slice(tags, func(i, j int) bool { return tags[i] < tags[j] })
+
+	numTables := len(tags)
+	headerSize := 12 + numTables*16
+
+	// Calculate offsets with 4-byte padding
+	offset := uint32(headerSize)
+	offsets := make(map[uint32]uint32, numTables)
+	for _, tag := range tags {
+		offsets[tag] = offset
+		paddedLen := uint32(len(tables[tag]))
+		if paddedLen%4 != 0 {
+			paddedLen += 4 - paddedLen%4
+		}
+		offset += paddedLen
 	}
 
-	numTables := int(binary.BigEndian.Uint16(baseFont[4:6]))
+	out := make([]byte, offset)
 
-	// Parse table directory
-	var cmapOffset, cmapLength uint32
-	var maxpOffset uint32
-	for i := 0; i < numTables; i++ {
+	// Header
+	binary.BigEndian.PutUint32(out[0:], 0x00010000) // TrueType
+	binary.BigEndian.PutUint16(out[4:], uint16(numTables))
+	sr := uint16(1)
+	es := uint16(0)
+	for sr*2 <= uint16(numTables) {
+		sr *= 2
+		es++
+	}
+	sr *= 16
+	binary.BigEndian.PutUint16(out[6:], sr)
+	binary.BigEndian.PutUint16(out[8:], es)
+	binary.BigEndian.PutUint16(out[10:], uint16(numTables)*16-sr)
+
+	// Directory entries
+	for i, tag := range tags {
 		base := 12 + i*16
-		tag := binary.BigEndian.Uint32(baseFont[base : base+4])
-		off := binary.BigEndian.Uint32(baseFont[base+8 : base+12])
-		ln := binary.BigEndian.Uint32(baseFont[base+12 : base+16])
-		switch tag {
-		case 0x636D6170: // cmap
-			cmapOffset = off
-			cmapLength = ln
-		case 0x6D617870: // maxp
-			maxpOffset = off
-		}
-	}
-	if cmapOffset == 0 {
-		return nil, fmt.Errorf("font has no cmap table")
-	}
-	if maxpOffset == 0 {
-		return nil, fmt.Errorf("font has no maxp table")
+		binary.BigEndian.PutUint32(out[base:], tag)
+		binary.BigEndian.PutUint32(out[base+4:], 0) // checksum placeholder
+		binary.BigEndian.PutUint32(out[base+8:], offsets[tag])
+		binary.BigEndian.PutUint32(out[base+12:], uint32(len(tables[tag])))
 	}
 
-	numGlyphs := int(binary.BigEndian.Uint16(baseFont[maxpOffset+4 : maxpOffset+6]))
-
-	origMap := parseCmap(baseFont[cmapOffset : cmapOffset+cmapLength])
-	if len(origMap) == 0 {
-		return nil, fmt.Errorf("cmap contains no glyph mappings")
+	// Table data
+	for _, tag := range tags {
+		copy(out[offsets[tag]:], tables[tag])
 	}
 
-	// Build CharMap for characters present in the font
-	supportedChars := make([]rune, 0, len(usedChars))
-	for _, r := range usedChars {
-		if _, ok := origMap[r]; ok {
-			supportedChars = append(supportedChars, r)
-		}
-	}
-	charMap := NewCharMap(supportedChars, seed)
+	// Zero head checksum adjustment
+	zeroHeadChecksumAdjustment(out, numTables)
 
-	// Build new cmap: merge original entries + PUA entries
-	mergedCmap := make(map[rune]uint16, len(origMap)+len(charMap.Forward))
-	for k, v := range origMap {
-		mergedCmap[k] = v
-	}
-	for orig, pua := range charMap.Forward {
-		mergedCmap[pua] = origMap[orig]
-	}
-	newCmap := buildCmap4(mergedCmap)
-
-	// Build new post table with randomized glyph names
-	newPost := buildRandomPostTable(numGlyphs, seed+1)
-
-	// Build the new font: append cmap + post, update directory entries
-	result := make([]byte, len(baseFont)+len(newCmap)+len(newPost))
-	copy(result, baseFont)
-	copy(result[len(baseFont):], newCmap)
-	copy(result[len(baseFont)+len(newCmap):], newPost)
-
-	newCmapOffset := uint32(len(baseFont))
-	newPostOffset := uint32(len(baseFont) + len(newCmap))
-
-	for i := 0; i < numTables; i++ {
-		base := 12 + i*16
-		tag := binary.BigEndian.Uint32(result[base : base+4])
-		if tag == 0x636D6170 { // cmap
-			binary.BigEndian.PutUint32(result[base+8:base+12], newCmapOffset)
-			binary.BigEndian.PutUint32(result[base+12:base+16], uint32(len(newCmap)))
-		}
-		if tag == 0x706F7374 { // post
-			binary.BigEndian.PutUint32(result[base+8:base+12], newPostOffset)
-			binary.BigEndian.PutUint32(result[base+12:base+16], uint32(len(newPost)))
-		}
-	}
-
-	zeroHeadChecksumAdjustment(result, numTables)
-
-	return &FontResult{
-		FontBytes: result,
-		CharMap:   charMap,
-	}, nil
+	return out, nil
 }
 
 func zeroHeadChecksumAdjustment(font []byte, numTables int) {
@@ -330,83 +302,43 @@ func GenerateFontKey() string {
 	return string(b)
 }
 
-// buildRandomPostTable creates a post table (format 2.0) where every glyph
-// has a random single-byte name. This prevents reverse-engineering the
-// character mapping from glyph names.
-//
-// post table format 2.0 layout:
-//   - version (4 bytes): 0x00020000
-//   - italicAngle (4 bytes): fixed-point
-//   - underlinePosition (2 bytes)
-//   - underlineThickness (2 bytes)
-//   - isFixedPitch (4 bytes)
-//   - minMemType42 (4 bytes)
-//   - maxMemType42 (4 bytes)
-//   - minMemType1 (4 bytes)
-//   - maxMemType1 (4 bytes)
-//   - numGlyphs (2 bytes)
-//   - glyphNameIndex[numGlyphs] (2 bytes each): indices into name table
-//   - names[]: Pascal strings (length byte + data)
-//
-// Standard Mac name indices are 0-257. Custom names use indices 258+.
 func buildRandomPostTable(numGlyphs int, seed int64) []byte {
 	rng := rand.New(rand.NewSource(seed))
 
-	// Generate a pool of random single-byte characters (0x01-0xFF range,
-	// avoiding only 0x00 which is the null terminator)
 	namePool := make([]byte, 255)
 	for i := range namePool {
 		namePool[i] = byte(i + 1)
 	}
-	// Shuffle the pool
 	rng.Shuffle(len(namePool), func(i, j int) {
 		namePool[i], namePool[j] = namePool[j], namePool[i]
 	})
 
-	// Build name indices: each glyph gets index 258+i, pointing to a
-	// custom name that is a single random byte
 	nameIndices := make([]uint16, numGlyphs)
 	for i := 0; i < numGlyphs; i++ {
 		nameIndices[i] = uint16(258 + i)
 	}
 
-	// Build custom name strings (Pascal strings: 1 byte length + data)
-	// Each name is a single random byte from the pool
-	nameStrings := make([]byte, numGlyphs*2) // 2 bytes per name (len + char)
+	nameStrings := make([]byte, numGlyphs*2)
 	for i := 0; i < numGlyphs; i++ {
-		nameStrings[i*2] = 1            // length = 1
+		nameStrings[i*2] = 1
 		nameStrings[i*2+1] = namePool[i%len(namePool)]
 	}
 
-	// Calculate total size
-	headerSize := 32 // fixed header (version through maxMemType1)
+	headerSize := 32
 	indicesSize := numGlyphs * 2
-	totalSize := headerSize + 2 + indicesSize + len(nameStrings) // +2 for numGlyphs
+	totalSize := headerSize + 2 + indicesSize + len(nameStrings)
 
 	buf := make([]byte, totalSize)
-
-	// Header
-	binary.BigEndian.PutUint32(buf[0:], 0x00020000)  // version 2.0
-	binary.BigEndian.PutUint32(buf[4:], 0)            // italicAngle
-	binary.BigEndian.PutUint16(buf[8:], 0xFFFF)       // underlinePosition (-1 as int16)
-	binary.BigEndian.PutUint16(buf[10:], 1)           // underlineThickness
-	binary.BigEndian.PutUint32(buf[12:], 0)           // isFixedPitch
-	binary.BigEndian.PutUint32(buf[16:], 0)           // minMemType42
-	binary.BigEndian.PutUint32(buf[20:], 0)           // maxMemType42
-	binary.BigEndian.PutUint32(buf[24:], 0)           // minMemType1
-	binary.BigEndian.PutUint32(buf[28:], 0)           // maxMemType1
-
-	// numGlyphs
+	binary.BigEndian.PutUint32(buf[0:], 0x00020000)
+	binary.BigEndian.PutUint16(buf[8:], 0xFFFF)
+	binary.BigEndian.PutUint16(buf[10:], 1)
 	binary.BigEndian.PutUint16(buf[32:], uint16(numGlyphs))
 
-	// glyphNameIndex array
 	off := 34
 	for _, idx := range nameIndices {
 		binary.BigEndian.PutUint16(buf[off:], idx)
 		off += 2
 	}
-
-	// Custom name strings
 	copy(buf[off:], nameStrings)
 
 	return buf

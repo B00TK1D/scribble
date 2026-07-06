@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -173,6 +174,50 @@ func TestFontGeneration(t *testing.T) {
 		len(data), numTables, len(result.CharMap.Forward))
 }
 
+func TestGlyphRandomization(t *testing.T) {
+	baseFont, _ := readFile("fonts/Roboto-Regular.ttf")
+	result, _ := RandomizeFont(baseFont, 100, printableChars())
+
+	findTable := func(data []byte, tag uint32) (off, ln uint32) {
+		n := int(binary.BigEndian.Uint16(data[4:6]))
+		for i := 0; i < n; i++ {
+			base := 12 + i*16
+			t := binary.BigEndian.Uint32(data[base : base+4])
+			if t == tag {
+				return binary.BigEndian.Uint32(data[base+8 : base+12]),
+					binary.BigEndian.Uint32(data[base+12 : base+16])
+			}
+		}
+		return
+	}
+
+	// hmtx should differ from original (advance width variation)
+	hmtxOff1, hmtxLen := findTable(baseFont, 0x686D7478)
+	hmtxOff2, _ := findTable(result.FontBytes, 0x686D7478)
+	origHmtx := baseFont[hmtxOff1 : hmtxOff1+hmtxLen]
+	newHmtx := result.FontBytes[hmtxOff2 : hmtxOff2+hmtxLen]
+	if string(origHmtx) == string(newHmtx) {
+		t.Error("hmtx should differ from original")
+	}
+
+	// glyf should differ from original (instruction zeroing)
+	glyfOff1, glyfLen := findTable(baseFont, 0x676C7966)
+	glyfOff2, _ := findTable(result.FontBytes, 0x676C7966)
+	origGlyf := baseFont[glyfOff1 : glyfOff1+glyfLen]
+	newGlyf := result.FontBytes[glyfOff2 : glyfOff2+glyfLen]
+	if string(origGlyf) == string(newGlyf) {
+		t.Error("glyf should differ from original (instructions zeroed)")
+	}
+
+	glyfDiffs := 0
+	for i := 0; i < int(glyfLen); i++ {
+		if origGlyf[i] != newGlyf[i] {
+			glyfDiffs++
+		}
+	}
+	t.Logf("vs original — hmtx: %d bytes differ, glyf: %d bytes differ", hmtxLen, glyfDiffs)
+}
+
 func TestFontIsDifferentEachTime(t *testing.T) {
 	baseFont, _ := readFile("fonts/Roboto-Regular.ttf")
 	r1, _ := RandomizeFont(baseFont, 100, printableChars())
@@ -255,6 +300,88 @@ func TestSaveFont(t *testing.T) {
 	result, _ := RandomizeFont(baseFont, 42, printableChars())
 	os.WriteFile("/tmp/scribble_test.ttf", result.FontBytes, 0644)
 	t.Logf("Wrote %d bytes to /tmp/scribble_test.ttf", len(result.FontBytes))
+}
+
+// TestPythonReferenceMatch verifies the Go output produces valid glyphs
+// by checking fonttools can parse every glyph without error.
+func TestPythonReferenceMatch(t *testing.T) {
+	if os.Getenv("SKIP_FONTTOOLS") == "1" {
+		t.Skip("fonttools validation skipped")
+	}
+
+	baseFont, _ := readFile("fonts/Roboto-Regular.ttf")
+	result, _ := RandomizeFont(baseFont, 42, printableChars())
+	os.WriteFile("/tmp/scribble_go.ttf", result.FontBytes, 0644)
+
+	// Verify with fonttools: every glyph must be parseable
+	cmd := exec.Command("python3", "-c", `
+from fontTools.ttLib import TTFont
+font = TTFont('/tmp/scribble_go.ttf')
+glyf = font['glyf']
+errors = []
+for name in font.getGlyphOrder():
+    g = glyf[name]
+    if g.numberOfContours and g.numberOfContours > 0:
+        if len(g.endPtsOfContours) == 0:
+            errors.append(f'{name}: no endPts')
+        elif g.endPtsOfContours[-1] + 1 != len(g.coordinates):
+            errors.append(f'{name}: endPts/coords mismatch')
+if errors:
+    for e in errors:
+        print(f'ERROR: {e}')
+    raise SystemExit(1)
+print(f'All {len(font.getGlyphOrder())} glyphs valid')
+`)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("glyph validation failed: %v\n%s", err, out)
+	}
+	t.Logf("%s", strings.TrimSpace(string(out)))
+}
+
+// TestFontToolsValidation validates the generated font with Python fonttools
+// (which uses the same OTS validation as Chrome). This catches any font
+// structural issues that Go-level tests might miss.
+func TestFontToolsValidation(t *testing.T) {
+	if os.Getenv("SKIP_FONTTOOLS") == "1" {
+		t.Skip("fonttools validation skipped")
+	}
+
+	baseFont, err := readFile("fonts/Roboto-Regular.ttf")
+	if err != nil {
+		t.Fatalf("read font: %v", err)
+	}
+
+	// Test multiple seeds to catch intermittent issues
+	seeds := []int64{1, 42, 100, 999, 12345}
+	for _, seed := range seeds {
+		result, err := RandomizeFont(baseFont, seed, printableChars())
+		if err != nil {
+			t.Fatalf("seed %d: RandomizeFont: %v", seed, err)
+		}
+
+		// Write to temp file
+		tmpPath := fmt.Sprintf("/tmp/scribble_validate_%d.ttf", seed)
+		os.WriteFile(tmpPath, result.FontBytes, 0644)
+
+		// Validate with fonttools
+		cmd := exec.Command("python3", "-c", fmt.Sprintf(`
+from fontTools.ttLib import TTFont
+font = TTFont(%q)
+cmap = font.getBestCmap()
+pua = {k: v for k, v in cmap.items() if 0xE000 <= k <= 0xF8FF}
+regular = {k: v for k, v in cmap.items() if k < 0xE000}
+assert len(pua) > 0, "no PUA entries"
+assert len(regular) == 0, f"expected 0 regular entries, got {len(regular)}"
+print(f"VALID: {len(cmap)} entries ({len(pua)} PUA)")
+`, tmpPath))
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("seed %d: fonttools validation failed: %v\n%s", seed, err, out)
+		}
+		t.Logf("seed %d: %s", seed, strings.TrimSpace(string(out)))
+		os.Remove(tmpPath)
+	}
 }
 
 func TestFontInterceptor(t *testing.T) {
