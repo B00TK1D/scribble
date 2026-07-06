@@ -12,7 +12,8 @@ import (
 func main() {
 	listen := flag.String("listen", ":8080", "address to listen on")
 	upstream := flag.String("upstream", "", "upstream URL to proxy (required)")
-	fontPath := flag.String("font", "", "path to base TTF font (default: embedded Roboto)")
+	fontPath := flag.String("font", "", "path to base TTF font (default: fonts/Roboto-Regular.ttf)")
+	selectors := flag.String("selectors", "*", "CSS selectors to apply the font to (default: all elements)")
 	flag.Parse()
 
 	if *upstream == "" {
@@ -46,6 +47,7 @@ func main() {
 		ListenAddr: *listen,
 		Upstream:   upstreamURL,
 		BaseFont:   baseFont,
+		Selectors:  *selectors,
 	}
 
 	if err := http.ListenAndServe(*listen, Proxy(cfg)); err != nil {
