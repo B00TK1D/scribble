@@ -10,18 +10,20 @@ const (
 	puaEnd   rune = 0xF8FF
 )
 
-// CharMap holds the bidirectional mapping between original characters
-// and their randomized PUA (Private Use Area) codepoints.
+// CharMap holds the mapping between original characters and their randomized
+// PUA codepoints. Supports one-to-many: each original character maps to
+// multiple PUA variants (different glyph shapes), and each occurrence in
+// HTML randomly picks one variant.
 type CharMap struct {
-	Forward map[rune]rune // original -> PUA
-	Reverse map[rune]rune // PUA -> original
+	Forward map[rune][]rune // original -> [PUA variant 0, PUA variant 1, ...]
+	Reverse map[rune]rune   // PUA -> original
+	Rng     *rand.Rand      // for picking random variants
 }
 
-// NewCharMap creates a randomized mapping from the given set of original
-// codepoints to unique PUA codepoints. Each call with the same input
-// produces a different mapping (due to shuffling).
-func NewCharMap(originals []rune, seed int64) *CharMap {
-	// Assign each original character a unique PUA codepoint
+// NewCharMap creates a randomized mapping with `variants` PUA codepoints
+// per original character. Each character gets `variants` different PUA
+// codepoints, each mapped to a different glyph in the font.
+func NewCharMap(originals []rune, seed int64, variants int) *CharMap {
 	available := make([]rune, 0, int(puaEnd-puaStart+1))
 	for c := puaStart; c <= puaEnd; c++ {
 		available = append(available, c)
@@ -32,23 +34,24 @@ func NewCharMap(originals []rune, seed int64) *CharMap {
 		available[i], available[j] = available[j], available[i]
 	})
 
-	// If we have more originals than PUA slots, truncate
-	n := len(originals)
-	if n > len(available) {
-		n = len(available)
-	}
-
-	// Sort originals for deterministic assignment (shuffling is in PUA order)
 	sorted := make([]rune, len(originals))
 	copy(sorted, originals)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
 
-	fwd := make(map[rune]rune, n)
-	rev := make(map[rune]rune, n)
-	for i := 0; i < n; i++ {
-		fwd[sorted[i]] = available[i]
-		rev[available[i]] = sorted[i]
+	fwd := make(map[rune][]rune, len(sorted))
+	rev := make(map[rune]rune, len(sorted)*variants)
+
+	slot := 0
+	for _, r := range sorted {
+		var puas []rune
+		for v := 0; v < variants && slot < len(available); v++ {
+			pua := available[slot]
+			puas = append(puas, pua)
+			rev[pua] = r
+			slot++
+		}
+		fwd[r] = puas
 	}
 
-	return &CharMap{Forward: fwd, Reverse: rev}
+	return &CharMap{Forward: fwd, Reverse: rev, Rng: rand.New(rand.NewSource(seed + 1))}
 }

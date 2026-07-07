@@ -24,7 +24,7 @@ func TestRewriteHTML(t *testing.T) {
 </body>
 </html>`
 
-	charMap := NewCharMap([]rune("ABCDEFGHILMNOPRSTWabcdefghilmnoprstw "), 42)
+	charMap := NewCharMap([]rune("ABCDEFGHILMNOPRSTWabcdefghilmnoprstw "), 42, 1)
 	fi := newFontInterceptor(nil)
 	var out strings.Builder
 	err := RewriteHTML(strings.NewReader(input), &out, "testkey123", charMap, "*", fi)
@@ -56,7 +56,7 @@ func TestAttributeReplacement(t *testing.T) {
 <span aria-label="Close dialog">X</span>
 </body></html>`
 
-	charMap := NewCharMap([]rune("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz "), 42)
+	charMap := NewCharMap([]rune("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz "), 42, 1)
 	fi := newFontInterceptor(nil)
 	var out strings.Builder
 	RewriteHTML(strings.NewReader(input), &out, "key", charMap, "*", fi)
@@ -93,7 +93,7 @@ func TestCSSContentReplacement(t *testing.T) {
 <div style='content: "Inline Style";'>More</div>
 </body></html>`
 
-	charMap := NewCharMap([]rune("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz "), 42)
+	charMap := NewCharMap([]rune("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz "), 42, 1)
 	fi := newFontInterceptor(nil)
 	var out strings.Builder
 	RewriteHTML(strings.NewReader(input), &out, "key", charMap, "*", fi)
@@ -112,7 +112,7 @@ func TestCSSContentReplacement(t *testing.T) {
 
 func TestSelectors(t *testing.T) {
 	input := `<html><head></head><body><p>Test</p></body></html>`
-	charMap := NewCharMap([]rune("T"), 42)
+	charMap := NewCharMap([]rune("T"), 42, 1)
 	fi := newFontInterceptor(nil)
 
 	var out strings.Builder
@@ -467,7 +467,7 @@ func TestGoogleFontsLink(t *testing.T) {
 <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400&display=swap" rel="stylesheet">
 </head><body><p>Hello</p></body></html>`
 
-	charMap := NewCharMap([]rune("Helo"), 42)
+	charMap := NewCharMap([]rune("Helo"), 42, 1)
 	fi := newFontInterceptor(nil)
 	var out strings.Builder
 	RewriteHTML(strings.NewReader(input), &out, "key", charMap, "*", fi)

@@ -133,10 +133,11 @@ func isProtectedElement(n *html.Node) bool {
 
 func replaceText(s string, charMap *CharMap) string {
 	var b strings.Builder
-	b.Grow(len(s))
+	b.Grow(len(s) * 4)
 	for _, r := range s {
-		if mapped, ok := charMap.Forward[r]; ok {
-			b.WriteRune(mapped)
+		if variants, ok := charMap.Forward[r]; ok && len(variants) > 0 {
+			// Randomly pick one PUA variant for each occurrence
+			b.WriteRune(variants[charMap.Rng.Intn(len(variants))])
 		} else {
 			b.WriteRune(r)
 		}
